@@ -1,6 +1,26 @@
+#!/usr/bin/env python3
+# libmarugarou (lib丸刈ろう) — a reader for CLIP STUDIO PAINT files
+# This library is still very unstable!
+
+# (c) 2022 Fredrick R. Brennan
+# Based on code (c) 2019 Rasen Suihei (MIT-licensed)
+# ###############################################################################
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+# this software or any of the provided source code files except in compliance
+# with the License.  You may obtain a copy of the License at
+# 
+#   http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations under the License.
+
 import sys
 import struct
 import os
+import logging
+import zlib
 
 CSF_CHUNK = b'CSFCHUNK'
 CHUNK_HEADER = b'CHNKHead'
@@ -8,10 +28,10 @@ CHUNK_EXTERNAL = b'CHNKExta'
 CHUNK_SQLITE = b'CHNKSQLi'
 CHUNK_FOOTER = b'CHNKFoot'
 
-BLOCK_DATA_BEGIN_CHUNK = b'\x00B\x00l\x00o\x00c\x00k\x00D\x00a\x00t\x00a\x00B\x00e\x00g\x00i\x00n\x00C\x00h\x00u\x00n\x00k'
-BLOCK_DATA_END_CHUNK = b'\x00B\x00l\x00o\x00c\x00k\x00D\x00a\x00t\x00a\x00E\x00n\x00d\x00C\x00h\x00u\x00n\x00k'
-BLOCK_STATUS = b'\x00B\x00l\x00o\x00c\x00k\x00S\x00t\x00a\x00t\x00u\x00s'
-BLOCK_CHECK_SUM = b'\x00B\x00l\x00o\x00c\x00k\x00C\x00h\x00e\x00c\x00k\x00S\x00u\x00m'
+BLOCK_DATA_BEGIN_CHUNK = 'BlockDataBeginChunk'.encode('utf-16be')
+BLOCK_DATA_END_CHUNK = 'BlockDataEndChunk'.encode('utf-16be')
+BLOCK_STATUS = 'BlockStatus'.encode('utf-16be')
+BLOCK_CHECK_SUM = 'BlockCheckSum'.encode('utf-16be')
 
 clip_header_spec = struct.Struct('>8sQQ')
 chunk_header_spec = struct.Struct('>8sQ')
@@ -19,6 +39,7 @@ external_header_spec = struct.Struct('>Q40sQ')
 block_test_spec = struct.Struct('>II')
 uint_spec = struct.Struct('>I')
 block_header_spec = struct.Struct('>I12xI')
+width_height_spec = struct.Struct('<I')
 
 def __read(struct, infile, pos):
     buff = infile.read(struct.size)
@@ -27,12 +48,17 @@ def __read(struct, infile, pos):
 
 def __pipe_file(outdir, filename, infile, length):
     outfile = open(os.path.join(outdir, filename), 'wb')
-    outfile.write(infile.read(length))
+    inp = infile.read(length)
+    try:
+        inp = zlib.decompress(inp)
+    except:
+        pass
+    outfile.write(inp)
     outfile.close()
 
 def split_clip(path, outdir, options):
     basedir, filename = os.path.split(path)
-    ext_index = filename.rfind('.clip')
+    ext_index = filename.rfind('.')
     if ext_index < 0:
         return
     without_ext = filename[:ext_index]
@@ -46,8 +72,7 @@ def split_clip(path, outdir, options):
         oldpos = pos
         data, pos = __read(chunk_header_spec, infile, pos)
         chunk_type, length = data
-        if options.verbose:
-            print('{0}: {1} ({2})'.format(oldpos, chunk_type.decode('UTF-8'), length))
+        logging.debug('{0:X}: {1} ({2} = {2:X})'.format(oldpos, chunk_type.decode('UTF-8'), length))
         if chunk_type == CHUNK_HEADER:
             __pipe_file(outdir, 'header', infile, length)
         if chunk_type == CHUNK_SQLITE:
@@ -56,8 +81,7 @@ def split_clip(path, outdir, options):
             data, pos2 = __read(external_header_spec, infile, pos)
             _, external_id, data_size = data
             external_id_str = external_id.decode('UTF-8')
-            if options.verbose:
-                print('  {0} ({1})'.format(external_id_str, data_size))
+            logging.debug('  {0} ({1} = {1:X})'.format(external_id_str, data_size))
             if options.blockdata:
                 __read_blockdata(infile, pos2, length, external_id_str, outdir, options)
                 infile.seek(pos2)
@@ -71,72 +95,57 @@ def __read_blockdata(infile, pos, length, external_id, outdir, options):
     while pos < end_pos:
         test_data, pos = __read(block_test_spec, infile, pos)
         a, b = test_data
-        if b == 4325484: # b'\x00B\x00l':
+        if b == uint_spec.unpack(BLOCK_DATA_BEGIN_CHUNK[:uint_spec.size])[0]:
             str_length = a
-            pos = infile.seek(pos - 4)
+            pos = infile.seek(pos - uint_spec.size)
         else:
             str_length = b
             data_length = a
         bd_id = infile.read(str_length * 2)
         pos += str_length * 2
         if bd_id == BLOCK_DATA_BEGIN_CHUNK:
-            if options.verbose:
-                print('  {0}'.format(infile.peek(20)[:20].hex()))
+            logging.debug('  {0}'.format(infile.peek(block_header_spec.size)[:block_header_spec.size].hex()))
             data, pos = __read(block_header_spec, infile, pos)
             block_index, not_empty = data
             if not_empty > 0:
                 data, pos = __read(uint_spec, infile, pos)
                 block_length = data[0]
-                if options.verbose:
-                    print('  BlockDataBeginChunk {0} ({1})'.format(block_index, block_length))
-                __pipe_file(outdir, '{0}.{1}'.format(external_id, block_index), infile, block_length)
-                pos += block_length
+                logging.debug('  BlockDataBeginChunk {0} ({1})'.format(block_index, block_length))
+                (data_length,), pos = __read(width_height_spec, infile, pos)
+                __pipe_file(outdir, '{0}.{1:04}'.format(external_id, block_index), infile, data_length)
+                pos += data_length
             else:
-                if options.verbose:
-                    print('  BlockDataBeginChunk {0} (empty)'.format(block_index))
+                logging.debug('  BlockDataBeginChunk {0} (empty)'.format(block_index))
         elif bd_id == BLOCK_DATA_END_CHUNK:
-            if options.verbose:
-                print('  BlockDataEndChunk')
+            logging.debug('  BlockDataEndChunk')
         elif bd_id == BLOCK_STATUS:
-            if options.verbose:
-                print('  BlockStatus')
+            logging.debug('  BlockStatus')
             pos = infile.seek(pos + 28)
         elif bd_id == BLOCK_CHECK_SUM:
-            if options.verbose:
-                print('  BlockCheckSum')
+            logging.debug('  BlockCheckSum')
             pos = infile.seek(pos + 28)
             return
         else:
-            print('Unknown Block: {0}'.format(str_length))
+            logging.error('Unknown Block: {0}'.format(str_length))
             return
 
 def __main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-v', '--verbose', action='store_true', help='print verbose log')
-    parser.add_argument('-s', '--split', action='store_true', help='split operation')
-    parser.add_argument('-m', '--merge', action='store_true', help='merge operation')
     parser.add_argument('--blockdata', action='store_true', help='split blockdata')
     targets = parser.add_argument_group('targets')
     targets.add_argument('-c', '--clip', type=str, help='clip file')
     targets.add_argument('-d', '--dir', type=str, help='splitted data direcotry')
     args = parser.parse_args()
+    logging.basicConfig(format='%(message)s', level=logging.DEBUG if args.verbose else logging.ERROR)
     def err(msg):
         print(msg)
         parser.print_usage()
-    if args.split and not args.clip:
+    if not args.clip:
         err('You have to specify -c|--clip.')
         return
-    if args.merge and not args.dir:
-        err('You have to specify -d|--dir.')
-        return
-    if not (args.split or args.merge):
-        err('You have to specify -s|--split or -m|--merge.')
-        return
-    if args.split:
-        split_clip(args.clip, args.dir, args)
-    if args.merge:
-        print('Merge operation is not supported.')
+    split_clip(args.clip, args.dir, args)
 
 if __name__ == '__main__':
     __main()
