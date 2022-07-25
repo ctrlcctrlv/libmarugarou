@@ -21,6 +21,7 @@ import struct
 import os
 import logging
 import zlib
+import sqlite3
 
 CSF_CHUNK = b'CSFCHUNK'
 CHUNK_HEADER = b'CHNKHead'
@@ -47,7 +48,8 @@ def __read(struct, infile, pos):
     return (data, pos + struct.size)
 
 def __pipe_file(outdir, filename, infile, length):
-    outfile = open(os.path.join(outdir, filename), 'wb')
+    filename = os.path.join(outdir, filename)
+    outfile = open(filename, 'wb')
     inp = infile.read(length)
     try:
         inp = zlib.decompress(inp)
@@ -55,6 +57,7 @@ def __pipe_file(outdir, filename, infile, length):
         pass
     outfile.write(inp)
     outfile.close()
+    return filename
 
 def split_clip(path, outdir, options):
     basedir, filename = os.path.split(path)
@@ -76,7 +79,8 @@ def split_clip(path, outdir, options):
         if chunk_type == CHUNK_HEADER:
             __pipe_file(outdir, 'header', infile, length)
         if chunk_type == CHUNK_SQLITE:
-            __pipe_file(outdir, without_ext + '.sqlite3', infile, length)
+            db = __pipe_file(outdir, without_ext + '.sqlite3', infile, length)
+            gen_preview(outdir, db)
         elif chunk_type == CHUNK_EXTERNAL:
             data, pos2 = __read(external_header_spec, infile, pos)
             _, external_id, data_size = data
@@ -89,6 +93,16 @@ def split_clip(path, outdir, options):
                 __pipe_file(outdir, external_id_str, infile, data_size)
         pos = infile.seek(pos + length)
     infile.close()
+
+def gen_preview(outdir, db):
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    preview_q = 'SELECT ImageData, ImageWidth, ImageHeight FROM CanvasPreview;'
+    cur.execute(preview_q)
+    rows = cur.fetchall()
+    for (i, row) in enumerate(rows):
+        with open(os.path.join(outdir, 'canvas_preview{0}.png'), 'wb+') as f:
+            f.write(row[0])
 
 def __read_blockdata(infile, pos, length, external_id, outdir, options):
     end_pos = pos + length
