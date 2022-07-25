@@ -38,8 +38,8 @@ chunk_header_spec = struct.Struct('>8sQ')
 external_header_spec = struct.Struct('>Q40sQ')
 block_test_spec = struct.Struct('>II')
 uint_spec = struct.Struct('>I')
+uint_spec2 = struct.Struct('<I')
 block_header_spec = struct.Struct('>I12xI')
-width_height_spec = struct.Struct('<I')
 
 def __read(struct, infile, pos):
     buff = infile.read(struct.size)
@@ -110,8 +110,8 @@ def __read_blockdata(infile, pos, length, external_id, outdir, options):
             if not_empty > 0:
                 data, pos = __read(uint_spec, infile, pos)
                 block_length = data[0]
-                logging.debug('  BlockDataBeginChunk {0} ({1})'.format(block_index, block_length))
-                (data_length,), pos = __read(width_height_spec, infile, pos)
+                logging.debug('  BlockDataBeginChunk {0} ({1} = {1:X})'.format(block_index, block_length))
+                (data_length,), pos = __read(uint_spec2, infile, pos)
                 __pipe_file(outdir, '{0}.{1:04}'.format(external_id, block_index), infile, data_length)
                 pos += data_length
             else:
@@ -126,7 +126,7 @@ def __read_blockdata(infile, pos, length, external_id, outdir, options):
             pos = infile.seek(pos + 28)
             return
         else:
-            logging.error('Unknown Block: {0}'.format(str_length))
+            logging.error('Unknown block of length {0} skipped'.format(str_length))
             return
 
 def __main():
